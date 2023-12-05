@@ -3,15 +3,21 @@ using Microsoft.Extensions.Hosting;
 
 namespace Bika.Downloader.Terminal ;
 
-    public class App(IHostApplicationLifetime hostApplicationLifetime, BikaService bikaService) : BackgroundService
+    public class App(IHostApplicationLifetime host, BikaService bikaService) : BackgroundService
     {
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
-            bikaService.Login();
-            await Task.Delay(100, stoppingToken);
-            Console.WriteLine("1234");
-            hostApplicationLifetime.StopApplication();
+            try
+            {
+                await bikaService.LoginAsync();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            }
+
+            host.StopApplication();
         }
     }
 
