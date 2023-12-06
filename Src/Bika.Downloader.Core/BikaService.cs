@@ -2,33 +2,21 @@
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
+using Bika.Downloader.Core.Extension;
 using Bika.Downloader.Core.Model;
 using Microsoft.Extensions.Configuration;
 
 namespace Bika.Downloader.Core;
 
-public class DefaultHeadersHandler : DelegatingHandler
+
+
+// 有请求体的请求添加Content-Type(这里内容必须是application/json; charset=UTF-8  否则bika会报错)
+public class ContentTypeHandler : DelegatingHandler
 {
-    private const string ApiKey = "C69BAF41DA5ABD1FFEDC6D2FEA56B";
-    private const string Nonce = "b1ab87b4800d4d4590a11701b8551afa";
-    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+                                                           CancellationToken cancellationToken)
     {
-        HttpRequestHeaders headers = request.Headers;
-        headers.Clear();
-        headers.Add("api-key", ApiKey);
-        headers.Add("Accept", "application/vnd.picacomic.com.v1+json");
-        headers.Add("app-channel", "1");
-        headers.Add("nonce", Nonce);
-        headers.Add("app-version", "2.2.1.2.3.3");
-        headers.Add("app-uuid", "defaultUuid");
-        headers.Add("app-platform", "android");
-        headers.Add("app-build-version", "45");
-        headers.Add("User-Agent", "okhttp/3.8.1");
-        headers.Add("image-quality", "original");
-        headers.Add("Content-Type", "application/json; charset=UTF-8");
-
         if (request.Content != null)
-
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json", "UTF-8");
 
         return base.SendAsync(request, cancellationToken);
@@ -40,15 +28,15 @@ public class SignatureHandler : DelegatingHandler
 {
     private const string BikaKey = @"~d}$Q7$eIni=V)9\RK/P.RM4;9[7|@/CA}b~OW!3?EV`:<>M7pddUBL5n|0/*Cn";
 
-    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request,
+                                                                 CancellationToken cancellationToken)
     {
         byte[] key = Encoding.UTF8.GetBytes(BikaKey);
         string path = request.RequestUri?.PathAndQuery.Substring(1) ?? "";
         var time = DateTimeOffset.Now.ToUnixTimeSeconds().ToString();
-        // var time = 1701682736.ToString();
-        string nonce = request.Headers.GetValues("nonce").FirstOrDefault() ?? "";
-        var method = request.Method.ToString();
-        string apiKey = request.Headers.GetValues("api-key").FirstOrDefault() ?? "";
+        string nonce = request.Headers.GetValues("nonce").FirstOrDefault("");
+        HttpMethod method = request.Method;
+        string apiKey = request.Headers.GetValues("api-key").FirstOrDefault("");
 
         // 待加密的数据
         byte[] raw = Encoding.UTF8.GetBytes((path + time + nonce + method + apiKey).ToLower());
@@ -60,44 +48,70 @@ public class SignatureHandler : DelegatingHandler
         string signature = BitConverter.ToString(signatureBytes).Replace("-", "").ToLower();
 
         HttpRequestHeaders headers = request.Headers;
-        headers.Add("signature", signature);
-        headers.Add("time", time);
 
-        Console.WriteLine(request.ToString());
+        headers.Set("signature", signature);
+        headers.Set("time", time);
 
         return await base.SendAsync(request, cancellationToken);
     }
+}
+
+public class DownloadArgs(string name, int totalPage, int downloadedPage) : EventArgs
+{
+    public readonly string Name = name;
+    public readonly int TotalPage = totalPage;
+    public readonly int DownloadedPage = downloadedPage;
+    public double Percent => DownloadedPage / TotalPage;
+
 }
 
 // bika api文档 https://apifox.com/apidoc/shared-44da213e-98f7-4587-a75e-db998ed067ad
 public class BikaService
 {
     private const string BasePath = "https://picaapi.picacomic.com/";
+    private const string ApiKey = "C69BAF41DA5ABD1FFEDC6D2FEA56B";
+    private const string Nonce = "b1ab87b4800d4d4590a11701b8551afa";
+
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;
+
+
 
     public BikaService(IConfiguration config, HttpClient httpClient)
     {
         _httpClient = httpClient;
         _config = config;
 
+        InitHttpClient();
+    }
+
+    private void InitHttpClient()
+    {
         _httpClient.BaseAddress = new Uri(BasePath);
+        HttpRequestHeaders headers = _httpClient.DefaultRequestHeaders;
+        headers.Add("api-key", ApiKey);
+        headers.Add("Accept", "application/vnd.picacomic.com.v1+json");
+        headers.Add("app-channel", "1");
+        headers.Add("nonce", Nonce);
+        headers.Add("app-version", "2.2.1.2.3.3");
+        headers.Add("app-uuid", "defaultUuid");
+        headers.Add("app-platform", "android");
+        headers.Add("app-build-version", "45");
+        headers.Add("User-Agent", "okhttp/3.8.1");
+        headers.Add("image-quality", "original");
     }
 
     public async Task LoginAsync()
     {
         var data = new { email = _config["username"], password = _config["password"] };
         using HttpResponseMessage response = await _httpClient.PostAsJsonAsync("auth/sign-in", data);
-        // response.EnsureSuccessStatusCode();
-        var a = await response.Content.ReadFromJsonAsync<object>();
-        Console.WriteLine(a);
-    }
+        response.EnsureSuccessStatusCode();
 
-    /**
-     * 下载和用户配置匹配的本子
-     */
-    public void Download()
-    {
+        // 返回对象是JsonElement, 这属于欺骗编译器的一种手段
+        dynamic content = await response.Content.ReadFromJsonAsync<object>() ?? throw new Exception("空数据返回");
+        string token = content.GetProperty("data").GetProperty("token").GetString();
+
+        _httpClient.DefaultRequestHeaders.Set("authorization", token);
     }
 
     /**
@@ -107,39 +121,5 @@ public class BikaService
     {
     }
 
-    public async void Test()
-    {
-        // 测试
-        using HMACSHA256 hmac = new("1"u8.ToArray());
-        using MemoryStream ms = new("2"u8.ToArray());
-        byte[] a = await hmac.ComputeHashAsync(ms);
-
-        Console.WriteLine(BitConverter.ToString(a).Replace("-", "").ToLower());
-
-
-        // 下面案例展示Encoding.GetString和BitConverter.toString区别
-        // 字符串utf8编码的字节数组 [41]
-        var t1 = "1"u8.ToArray();
-
-        foreach (byte b in t1)
-        {
-            Console.Write($"{b} ");
-        }
-
-        Console.WriteLine("\n------");
-
-        // 值类型转为字节数组 [49, 0]
-        foreach (byte b in BitConverter.GetBytes('1'))
-        {
-            Console.Write($"{b} ");
-        }
-
-        Console.WriteLine("\n-----");
-
-        // [41]字节数组变回曾经的原始字符串 [41] => "1"
-        Console.WriteLine(Encoding.UTF8.GetString(t1));
-        // 将指定字节数组的每个元素的数值转换为其等效的十六进制字符串表示形式。
-        // 也就是将字节数组内的值变为16进制，然后数组之间使用'-'连接 [41] => 31
-        Console.WriteLine(BitConverter.ToString(t1));
-    }
+    public event EventHandler<DownloadArgs> OnDownloadProgress;
 }

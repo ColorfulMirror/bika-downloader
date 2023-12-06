@@ -12,8 +12,10 @@ ConfigurationManager config = builder.Configuration;
 
 services.AddHostedService<App>();
 services.AddTransient<SignatureHandler>();
-services.AddTransient<DefaultHeadersHandler>();
-services.AddHttpClient<BikaService>().AddHttpMessageHandler<DefaultHeadersHandler>().AddHttpMessageHandler<SignatureHandler>();
+services.AddTransient<ContentTypeHandler>();
+services.AddHttpClient<BikaService>()
+        .AddHttpMessageHandler<ContentTypeHandler>()
+        .AddHttpMessageHandler<SignatureHandler>();
 
 
 // 加载home目录下的配置文件
