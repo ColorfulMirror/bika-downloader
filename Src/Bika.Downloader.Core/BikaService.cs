@@ -2,13 +2,13 @@
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Bika.Downloader.Core.Extension;
 using Bika.Downloader.Core.Model;
 using Microsoft.Extensions.Configuration;
 
 namespace Bika.Downloader.Core;
-
-
 
 // 有请求体的请求添加Content-Type(这里内容必须是application/json; charset=UTF-8  否则bika会报错)
 public class ContentTypeHandler : DelegatingHandler
@@ -56,9 +56,10 @@ public class SignatureHandler : DelegatingHandler
     }
 }
 
-public class DownloadArgs(string name, int totalPage, int downloadedPage) : EventArgs
+public class DownloadProgressArgs(string name, int totalPage, int downloadedPage, string author) : EventArgs
 {
     public readonly string Name = name;
+    public readonly string Author = author;
     public readonly int TotalPage = totalPage;
     public readonly int DownloadedPage = downloadedPage;
     public double Percent => DownloadedPage / TotalPage;
@@ -75,7 +76,7 @@ public class BikaService
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;
 
-
+    public event EventHandler<DownloadProgressArgs> OnDownloadProgress;
 
     public BikaService(IConfiguration config, HttpClient httpClient)
     {
@@ -107,11 +108,52 @@ public class BikaService
         using HttpResponseMessage response = await _httpClient.PostAsJsonAsync("auth/sign-in", data);
         response.EnsureSuccessStatusCode();
 
-        // 返回对象是JsonElement, 这属于欺骗编译器的一种手段
-        dynamic content = await response.Content.ReadFromJsonAsync<object>() ?? throw new Exception("空数据返回");
-        string token = content.GetProperty("data").GetProperty("token").GetString();
 
-        _httpClient.DefaultRequestHeaders.Set("authorization", token);
+        JsonObject content = await response.Content.ReadFromJsonAsync<JsonObject>() ?? throw new Exception("返回值不是一个JSON对象");
+        string token = content["data"]["token"].GetValue<string>();
+
+        _httpClient.DefaultRequestHeaders.Add("authorization", token);
+    }
+
+    public async Task<IEnumerable<Comic>> GetUserFavorites()
+    {
+        // 获取收藏夹的总页数，bika后端做了强制分页
+        async Task<int> GetFavoritePages()
+        {
+            JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>("users/favourite") ?? throw new Exception("空返回值");
+            return response["data"]["comics"]["pages"].GetValue<int>();
+        }
+
+        async Task<IEnumerable<Comic>> GetFavorites(int page)
+        {
+            JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>($"users/favourite?page={page}") ?? throw new Exception("空返回值");
+            return JsonSerializer.Deserialize<Comic[]>(response["data"]["comics"]["docs"]);
+        }
+
+        int pages = await GetFavoritePages();
+
+        IEnumerable<Task<IEnumerable<Comic>>> tasks = Enumerable.Range(1, pages).Select(GetFavorites);
+
+        Task<IEnumerable<Comic>[]> combinedTask = Task.WhenAll(tasks);
+
+        try
+        {
+            IEnumerable<Comic>[] allComics = await combinedTask;
+            return allComics.Aggregate((all, comics) => all.Concat(comics));
+        }
+        catch
+        {
+            if (combinedTask.Exception?.InnerExceptions != null)
+                foreach (Exception e in combinedTask.Exception.InnerExceptions)
+                {
+                    Console.WriteLine(e);
+
+                    throw e;
+                }
+
+            throw;
+        }
+
     }
 
     /**
@@ -121,5 +163,4 @@ public class BikaService
     {
     }
 
-    public event EventHandler<DownloadArgs> OnDownloadProgress;
 }
