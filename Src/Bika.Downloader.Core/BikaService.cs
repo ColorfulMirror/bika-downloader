@@ -1,4 +1,5 @@
-﻿using System.Net.Http.Headers;
+﻿using System.Collections;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -75,6 +76,10 @@ public class BikaService
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _config;
+    private readonly JsonSerializerOptions _camelCase = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+    private readonly JsonSerializerOptions _snakeCaseLower = new()
+        { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
     public event EventHandler<DownloadProgressArgs> OnDownloadProgress;
 
@@ -109,51 +114,72 @@ public class BikaService
         response.EnsureSuccessStatusCode();
 
 
-        JsonObject content = await response.Content.ReadFromJsonAsync<JsonObject>() ?? throw new Exception("返回值不是一个JSON对象");
-        string token = content["data"]["token"].GetValue<string>();
+        JsonObject content = await response.Content.ReadFromJsonAsync<JsonObject>() ??
+                             throw new Exception("返回值不是一个JSON对象");
+        var token = content["data"]["token"].GetValue<string>();
 
         _httpClient.DefaultRequestHeaders.Add("authorization", token);
     }
 
-    public async Task<IEnumerable<Comic>> GetUserFavorites()
+    public async Task<Comic[]> GetUserFavorites()
     {
-        // 获取收藏夹的总页数，bika后端做了强制分页
-        async Task<int> GetFavoritePages()
+        // 传递一个给出页数，返回总页数以及当前页数数据的函数(GetListWithPage)
+        Comic[] comics = await GetAllPage<Comic>(async page => {
+            JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>($"users/favourite?page={page}") ??
+                                  throw new InvalidOperationException("空响应");
+            var pages = response["data"]["comics"]["pages"].GetValue<int>();
+            Comic[] comics = response["data"]["comics"]["docs"].Deserialize<Comic[]>(_camelCase) ??
+                             throw new Exception("没有数据");
+            return (pages, comics);
+        });
+        return comics;
+    }
+
+    public async Task<Comic> GetComic(string id)
+    {
+        JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>($"comics/{id}") ??
+                              throw new InvalidOperationException("空响应");
+        return response["data"]["comic"].Deserialize<Comic>(_camelCase);
+    }
+
+    /**
+     * 接受一个函数，参数是要查询的页数，返回值是总页数+查询页数数据的元组
+     * 处理Bika强制分页的接口
+     */
+    private async Task<T[]> GetAllPage<T>(Func<int, Task<(int pages, IEnumerable<T> list)>> fn)
+    {
+        // 获取第n页的列表数据，丢弃了总页数的一个包裹
+        async Task<IEnumerable<T>> GetList(int page)
         {
-            JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>("users/favourite") ?? throw new Exception("空返回值");
-            return response["data"]["comics"]["pages"].GetValue<int>();
+            (_, IEnumerable<T> data) = await fn(page);
+            return data;
         }
 
-        async Task<IEnumerable<Comic>> GetFavorites(int page)
+        // 通过手动调用一次得到总页数以及第一页的数据
+        (int pages, IEnumerable<T> results) = await fn(1);
+
+        if (pages <= 1) return results.ToArray();
+        // 将所有页数映射为Task, 然后5个为一组分别执行
+        IEnumerable<Task<IEnumerable<T>>[]> chunkedTasks = Enumerable.Range(1, pages).Select(GetList).Chunk(5);
+
+        // 执行分组内的Task获取数据
+        foreach (Task<IEnumerable<T>>[] tasks in chunkedTasks)
         {
-            JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>($"users/favourite?page={page}") ?? throw new Exception("空返回值");
-            return JsonSerializer.Deserialize<Comic[]>(response["data"]["comics"]["docs"]);
+            Task<IEnumerable<T>[]> combinedTask = Task.WhenAll(tasks);
+            try
+            {
+                IEnumerable<T>[] remainLists = await combinedTask;
+                IEnumerable<T> remainList = remainLists.Aggregate((all, cur) => all.Concat(cur));
+                results = results.Concat(remainList);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+                throw;
+            }
         }
 
-        int pages = await GetFavoritePages();
-
-        IEnumerable<Task<IEnumerable<Comic>>> tasks = Enumerable.Range(1, pages).Select(GetFavorites);
-
-        Task<IEnumerable<Comic>[]> combinedTask = Task.WhenAll(tasks);
-
-        try
-        {
-            IEnumerable<Comic>[] allComics = await combinedTask;
-            return allComics.Aggregate((all, comics) => all.Concat(comics));
-        }
-        catch
-        {
-            if (combinedTask.Exception?.InnerExceptions != null)
-                foreach (Exception e in combinedTask.Exception.InnerExceptions)
-                {
-                    Console.WriteLine(e);
-
-                    throw e;
-                }
-
-            throw;
-        }
-
+        return results.ToArray();
     }
 
     /**
@@ -161,6 +187,63 @@ public class BikaService
      */
     public void Download(Comic[] comics)
     {
+
     }
 
+    public void Dwonload(Comic comic)
+    {
+
+    }
+
+    public Task<Episode[]> GetEpisodes(string comicId)
+    {
+        return GetAllPage<Episode>(async page => {
+            JsonObject response = await _httpClient.GetFromJsonAsync<JsonObject>($"comics/{comicId}/eps?page={page}") ??
+                                  throw new InvalidOperationException("空响应");
+            var pages = response["data"]["eps"]["pages"].GetValue<int>();
+            Episode[] list = response["data"]["eps"]["docs"].Deserialize<Episode[]>(_snakeCaseLower) ??
+                             throw new Exception("没有数据");
+            return (pages, list);
+        });
+    }
+
+    public Task<Asset[]> GetEpisodePictures(string comicId, int episodeOrder)
+    {
+        return GetAllPage<Asset>(async page => {
+            JsonObject response =
+                await _httpClient.GetFromJsonAsync<JsonObject>(
+                    $"comics/{comicId}/order/{episodeOrder}/pages?page={page}") ??
+                throw new InvalidOperationException("空响应");
+            var pages = response["data"]["pages"]["pages"].GetValue<int>();
+            Asset[] list = response["data"]["pages"]["docs"].AsArray()
+                                                            .Select(
+                                                                 item => item["media"].Deserialize<Asset>(_camelCase))
+                                                            .ToArray();
+            return (pages, list);
+        });
+    }
+
+    // 获取目标ID漫画的所有图片
+    public async Task<Asset[]> GetPictures(string comicId)
+    {
+        Episode[] episodes = await GetEpisodes(comicId);
+
+        // 所有章节的所有图片任务
+        IEnumerable<Task<Asset[]>> tasks = episodes.Select(episode => GetEpisodePictures(comicId, episode.Order));
+
+        Task<Asset[][]> combinedTask = Task.WhenAll(tasks);
+        try
+        {
+            IEnumerable<Asset>[] allPictureList = await combinedTask;
+
+            Asset[] pictures = allPictureList.Aggregate((all, cur) => all.Concat(cur)).ToArray();
+            return pictures;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+            throw;
+        }
+
+    }
 }
