@@ -31,10 +31,12 @@ public class BikaService(IConfiguration config)
 
             const string filePath = "downloaded.json";
             using FileStream stream = File.Open(filePath, FileMode.OpenOrCreate);
-            // 往流里面方便的写字符串使用StreamWriter比较方便, 装饰器流，原本的数据流并不会被修改
-            using StreamWriter writer = new (stream);
-            if (stream.Length == 0) writer.WriteAsync("[]");
-            List<DownloadedComic> records = JsonSerializer.Deserialize<List<DownloadedComic>>(writer.BaseStream) ?? [];
+            if (stream.Length == 0)
+            {
+                byte[] content = "[]"u8.ToArray();
+                stream.WriteAsync(content, 0, content.Length);
+            }
+            List<DownloadedComic> records = JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
             _downloadedComics = records;
 
             return _downloadedComics;
