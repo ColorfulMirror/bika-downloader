@@ -5,6 +5,7 @@ using Bika.Downloader.Core.Model;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Spectre.Console;
+using Exception = System.Exception;
 
 namespace Bika.Downloader.Terminal;
 
@@ -26,15 +27,7 @@ public class App(IHostApplicationLifetime host, BikaService bikaService, IConfig
         AnsiConsole.MarkupLine($"用户[green]{username}[/]登录成功");
 
 
-        // await foreach (Comic comic in bikaService.GetUserFavoritesAsync().WithCancellation(stoppingToken))
-        // {
-        //     Console.WriteLine($"foreach inner, {comic.Title}， {comic.Id}");
-        // }
-
-        await foreach (Asset asset in bikaService.GetPicturesAsync("5884941e3f65ce7fcdd5be87").WithCancellation(stoppingToken))
-        {
-            Console.WriteLine(asset);
-        }
+        await bikaService.Download(await bikaService.GetComicAsync("5884941e3f65ce7fcdd5be87"));
 
         host.StopApplication();
     }
