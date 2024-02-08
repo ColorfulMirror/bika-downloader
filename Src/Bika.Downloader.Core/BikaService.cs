@@ -1,7 +1,9 @@
-﻿using System.Net.Http.Headers;
+﻿using System.Net;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Bika.Downloader.Core.Extension;
@@ -10,38 +12,22 @@ using Microsoft.Extensions.Configuration;
 
 namespace Bika.Downloader.Core;
 
-
-
 // bika api文档 https://apifox.com/apidoc/shared-44da213e-98f7-4587-a75e-db998ed067ad
 public class BikaService(IConfiguration config)
 {
     private readonly HttpClient _httpClient = BikaHttpClientFactory.Create("https://picaapi.picacomic.com/");
-    private readonly HttpClient _assetHttpClient= BikaHttpClientFactory.Create("https://storage1.picacomic.com/");
+    private readonly HttpClient _assetHttpClient = BikaHttpClientFactory.Create("https://storage1.picacomic.com/");
     private readonly JsonSerializerOptions _camelCase = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
     private readonly JsonSerializerOptions _snakeCaseLower = new()
         { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower };
 
-    private List<DownloadedComic>? _downloadedComics;
-
-    public List<DownloadedComic> DownloadedComics
+    private readonly JsonSerializerOptions _normalSerializeOption = new()
     {
-        get
-        {
-            if (_downloadedComics != null) return _downloadedComics;
-
-            const string filePath = "downloaded.json";
-            using FileStream stream = File.Open(filePath, FileMode.OpenOrCreate);
-            if (stream.Length == 0)
-            {
-                byte[] content = "[]"u8.ToArray();
-                stream.WriteAsync(content, 0, content.Length);
-            }
-            List<DownloadedComic> records = JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
-            _downloadedComics = records;
-
-            return _downloadedComics;
-        }
-    }
+        // 为了输出中文
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        WriteIndented = true
+    };
 
     public async Task LoginAsync()
     {
@@ -193,7 +179,8 @@ public class BikaService(IConfiguration config)
     // 这个方法会异步持续并发10个请求获取数据，存在一个自旋一直迭代yield已获取的数据。
     // 这个比上面实现好的是，会并发获取数据，但是foreach循环体内的代码依旧会阻塞yield的运行
     // 这其实是最佳方案，它本身可以以最快的速读拿到所有数据，并且可以以最快速度迭代第一个数据。
-    private async IAsyncEnumerable<(int, T)> GetAllPageAsync4<T>(Func<int, Task<(int pages, IEnumerable<T> list)>> getPage)
+    private async IAsyncEnumerable<(int, T)> GetAllPageAsync4<T>(
+        Func<int, Task<(int pages, IEnumerable<T> list)>> getPage)
     {
         (int totalPage, IEnumerable<T> firstPage) = await getPage(1);
 
@@ -257,28 +244,97 @@ public class BikaService(IConfiguration config)
         }
     }
 
+    // Todo: 加入IProgress进度
     public async Task Download(Comic comic)
     {
         SemaphoreSlim semaphore = new(10);
 
-        DownloadedComic? downloadedComic = DownloadedComics.Find(c => c.Id == comic.Id);
+        // 读取downloaded.json文件反序列化
+        await using FileStream stream = File.Open("downloaded.json", FileMode.OpenOrCreate);
+        if (stream.Length == 0)
+        {
+            byte[] content = "[]"u8.ToArray();
+            await stream.WriteAsync(content);
+            stream.Position = 0;
+        }
+        List<DownloadedComic> downloadedComics = JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
+        DownloadedComic? downloadedComic = downloadedComics.Find(c => c.Id == comic.Id);
 
-        // 下载过了并且没有更新直接跳过下载
-        if (downloadedComic != null && comic.EpsCount <= downloadedComic.EpisodesId.Length) return;
+        if (downloadedComic == null)
+        {
+            downloadedComic = new DownloadedComic(comic);
+            downloadedComics.Add(downloadedComic);
+        }
+
+        // 下载过了并且已经全部下载没有新更新
+        if (comic.EpsCount <= downloadedComic.EpisodesId.Count) return;
+
+        const string rootPath = "comics";
+        string comicPath = Path.Join(rootPath, $"[{comic.Author}]{comic.Title}");
+        comicPath = ReplaceInvalidChar(comicPath);
+        Directory.CreateDirectory(comicPath);
+
 
         await foreach ((_, Episode episode) in GetEpisodesAsync(comic.Id))
         {
-            bool isDownloaded = downloadedComic?.EpisodesId.Contains(episode.Id) ?? false;
+            bool isDownloaded = downloadedComic.EpisodesId.Contains(episode.Id);
             // 该章节下载过了就跳过
-            if(isDownloaded) continue;
+            if (isDownloaded) continue;
 
+            string episodePath = Path.Join(comicPath, $"[{comic.Author}]{comic.Title}.{episode.Title}");
+            episodePath = ReplaceInvalidChar(episodePath);
+            Directory.CreateDirectory(episodePath);
 
-            Console.WriteLine($"Episode: {episode.Title}");
+            List<Task> allDownloadPicTask = [];
             // 下载该章节的图片
             await foreach ((int picIndex, Asset picture) in GetEpisodePicturesAsync(comic.Id, episode.Order))
             {
-                Console.WriteLine($"index: {picIndex}, picture: {picture}");
+                var filename = $"{picIndex.ToString().PadLeft(4, '0')}.jpg";
+                string filePath = Path.Join(episodePath, filename);
+                var url = $"{picture.FileServer}/static/{picture.Path}";
+
+                allDownloadPicTask.Add(DownloadPic(filePath, url));
             }
+
+            await Task.WhenAll(allDownloadPicTask);
+
+            downloadedComic.EpisodesId.Add(episode.Id);
+            stream.SetLength(0);
+        }
+
+        await JsonSerializer.SerializeAsync(stream, downloadedComics, _normalSerializeOption);
+        return;
+
+        async Task DownloadPic(string filePath, string url)
+        {
+            await semaphore.WaitAsync();
+            var temp = $"{filePath}.tmp";
+            await using FileStream fileStream = File.Create(temp);
+            Stream stream = await _assetHttpClient.GetStreamAsync(url);
+            await stream.CopyToAsync(fileStream);
+            File.Move(temp, filePath, true);
+            semaphore.Release();
+        }
+
+        string ReplaceInvalidChar(string str)
+        {
+            IEnumerable<(char, char)> InvalidChars =
+            [
+                ('/', '／'), ('\\', '＼'), ('?', '？'), ('|', '︱'), ('\"', '＂'), ('*', '＊'), ('<', '＜'), ('>', '＞'),
+                (':', '-'), ('·', '・')
+            ];
+
+            foreach ((char valid, char invalid) in InvalidChars)
+            {
+                str = str.Replace(invalid, valid);
+            }
+            return str;
+        }
+
+        async Task RecordDownloadedComics(IEnumerable<DownloadedComic> comics)
+        {
+            await using FileStream stream = File.Create("downloaded.json");
+            await JsonSerializer.SerializeAsync(stream, comics);
         }
     }
 
