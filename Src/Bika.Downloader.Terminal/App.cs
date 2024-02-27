@@ -1,11 +1,8 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using Bika.Downloader.Core;
 using Bika.Downloader.Core.Model;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Spectre.Console;
-using Exception = System.Exception;
 
 namespace Bika.Downloader.Terminal;
 
@@ -27,7 +24,31 @@ public class App(IHostApplicationLifetime host, BikaService bikaService, IConfig
         AnsiConsole.MarkupLine($"用户[green]{username}[/]登录成功");
 
 
-        await bikaService.Download(await bikaService.GetComicAsync("5884941e3f65ce7fcdd5be87"));
+        await AnsiConsole.Progress()
+                         .Columns([
+                              new TaskDescriptionColumn { Alignment = Justify.Left },
+                              new ProgressBarColumn(), // Progress bar
+                              new PercentageColumn(),
+                              new SpinnerColumn()
+                          ])
+                         .StartAsync(async ctx => {
+                              Comic comic = await bikaService.GetComicAsync("5884941e3f65ce7fcdd5be87");
+                              Dictionary<string, ProgressTask> hash = new();
+                              Progress<DownloadProgress> progress = new(p => {
+                                  var taskName = $"[bold]{p.comicTitle} - {p.episodeTitle}[/]";
+                                  if (!hash.TryGetValue(taskName, out ProgressTask? value))
+                                  {
+                                      ProgressTask task = ctx.AddTask(taskName);
+                                      hash.Add(taskName, task);
+                                  }
+                                  else
+                                  {
+                                      value.Value = p.progress * 100;
+                                  }
+                              });
+                              await bikaService.Download(comic, progress);
+                          });
+
 
         host.StopApplication();
     }

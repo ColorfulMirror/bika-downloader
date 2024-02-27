@@ -1,12 +1,7 @@
-﻿using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
-using System.Security.Cryptography;
-using System.Text;
+﻿using System.Net.Http.Json;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using Bika.Downloader.Core.Extension;
 using Bika.Downloader.Core.Model;
 using Microsoft.Extensions.Configuration;
 
@@ -225,10 +220,11 @@ public class BikaService(IConfiguration config)
         void GetPageData(int page)
         {
             semaphore.Wait();
-            getPage(page).ContinueWith(t => {
-                result[page - 1] = t.Result.list;
-                semaphore.Release();
-            });
+            getPage(page)
+               .ContinueWith(t => {
+                    result[page - 1] = t.Result.list;
+                    semaphore.Release();
+                });
         }
 
     }
@@ -236,17 +232,18 @@ public class BikaService(IConfiguration config)
     /**
      * 下载参数提供的本子
      */
-    public async Task Download(IEnumerable<Comic> comics)
+    public async Task Download(IEnumerable<Comic> comics, IProgress<DownloadProgress>? progress = null)
     {
         foreach (Comic comic in comics)
         {
-            await Download(comic);
+            await Download(comic, progress);
         }
     }
 
     // Todo: 加入IProgress进度
-    public async Task Download(Comic comic)
+    public async Task Download(Comic comic, IProgress<DownloadProgress>? progress = null)
     {
+        // 并发下载图片数量
         SemaphoreSlim semaphore = new(10);
 
         // 读取downloaded.json文件反序列化
@@ -257,14 +254,10 @@ public class BikaService(IConfiguration config)
             await stream.WriteAsync(content);
             stream.Position = 0;
         }
-        List<DownloadedComic> downloadedComics = JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
-        DownloadedComic? downloadedComic = downloadedComics.Find(c => c.Id == comic.Id);
 
-        if (downloadedComic == null)
-        {
-            downloadedComic = new DownloadedComic(comic);
-            downloadedComics.Add(downloadedComic);
-        }
+        List<DownloadedComic> downloadedComics = JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
+        DownloadedComic downloadedComic = downloadedComics.Where(c => c.Id == comic.Id)
+                                                          .FirstOrDefault(new DownloadedComic(comic));
 
         // 下载过了并且已经全部下载没有新更新
         if (comic.EpsCount <= downloadedComic.EpisodesId.Count) return;
@@ -275,6 +268,7 @@ public class BikaService(IConfiguration config)
         Directory.CreateDirectory(comicPath);
 
 
+        // 下载一个章节
         await foreach ((_, Episode episode) in GetEpisodesAsync(comic.Id))
         {
             bool isDownloaded = downloadedComic.EpisodesId.Contains(episode.Id);
@@ -286,7 +280,8 @@ public class BikaService(IConfiguration config)
             Directory.CreateDirectory(episodePath);
 
             List<Task> allDownloadPicTask = [];
-            // 下载该章节的图片
+            float downloadedPicCount = 0;
+            // 下载该章节的所有图片
             await foreach ((int picIndex, Asset picture) in GetEpisodePicturesAsync(comic.Id, episode.Order))
             {
                 var filename = $"{picIndex.ToString().PadLeft(4, '0')}.jpg";
@@ -294,47 +289,51 @@ public class BikaService(IConfiguration config)
                 var url = $"{picture.FileServer}/static/{picture.Path}";
 
                 allDownloadPicTask.Add(DownloadPic(filePath, url));
+                continue;
+
+                async Task DownloadPic(string filePath, string url)
+                {
+                    await semaphore.WaitAsync();
+                    var temp = $"{filePath}.tmp";
+                    await using FileStream fileStream = File.Create(temp);
+                    Stream picStream = await _assetHttpClient.GetStreamAsync(url);
+                    // 将该图片的二进制流写入文件流
+                    await picStream.CopyToAsync(fileStream);
+                    File.Move(temp, filePath, true);
+                    semaphore.Release();
+                    downloadedPicCount++;
+                    DownloadProgress downloadProgress = new(comic.Title, episode.Title, downloadedPicCount / allDownloadPicTask.Count);
+                    progress?.Report(downloadProgress);
+                }
             }
 
+            // 并发下载所有图片(方法内部控制了并发数量)
             await Task.WhenAll(allDownloadPicTask);
 
             downloadedComic.EpisodesId.Add(episode.Id);
             stream.SetLength(0);
         }
 
+        // 写入downloaded.json文件
+        if (!downloadedComics.Exists(c => c.Id == comic.Id)) downloadedComics.Add(downloadedComic);
         await JsonSerializer.SerializeAsync(stream, downloadedComics, _normalSerializeOption);
-        return;
 
-        async Task DownloadPic(string filePath, string url)
-        {
-            await semaphore.WaitAsync();
-            var temp = $"{filePath}.tmp";
-            await using FileStream fileStream = File.Create(temp);
-            Stream stream = await _assetHttpClient.GetStreamAsync(url);
-            await stream.CopyToAsync(fileStream);
-            File.Move(temp, filePath, true);
-            semaphore.Release();
-        }
+        return;
 
         string ReplaceInvalidChar(string str)
         {
-            IEnumerable<(char, char)> InvalidChars =
+            IEnumerable<(char, char)> invalidChars =
             [
                 ('/', '／'), ('\\', '＼'), ('?', '？'), ('|', '︱'), ('\"', '＂'), ('*', '＊'), ('<', '＜'), ('>', '＞'),
                 (':', '-'), ('·', '・')
             ];
 
-            foreach ((char valid, char invalid) in InvalidChars)
+            foreach ((char valid, char invalid) in invalidChars)
             {
                 str = str.Replace(invalid, valid);
             }
-            return str;
-        }
 
-        async Task RecordDownloadedComics(IEnumerable<DownloadedComic> comics)
-        {
-            await using FileStream stream = File.Create("downloaded.json");
-            await JsonSerializer.SerializeAsync(stream, comics);
+            return str;
         }
     }
 
@@ -361,10 +360,10 @@ public class BikaService(IConfiguration config)
                     $"comics/{comicId}/order/{episodeOrder}/pages?page={page}") ??
                 throw new InvalidOperationException("空响应");
             var pages = response["data"]["pages"]["pages"].GetValue<int>();
-            Asset[] list = response["data"]["pages"]["docs"].AsArray()
-                                                            .Select(
-                                                                 item => item["media"].Deserialize<Asset>(_camelCase))
-                                                            .ToArray();
+            Asset[] list = response["data"]["pages"]["docs"]
+                          .AsArray()
+                          .Select(item => item["media"].Deserialize<Asset>(_camelCase))
+                          .ToArray();
             return (pages, list);
         });
     }

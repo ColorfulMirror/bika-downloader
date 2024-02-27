@@ -3,13 +3,4 @@ using System.Text.Json.Serialization;
 namespace Bika.Downloader.Core.Model;
 
 
-public record struct Comic
-{
-    [JsonPropertyName("_id")]
-    public string Id { get; set; }
-    public string Title { get; set; }
-    public Asset Asset { get; set; }
-    public string Author { get; set; }
-    public bool Finished { get; set; }
-    public int EpsCount { get; set; }
-}
+public record struct Comic([property: JsonPropertyName("_id")] string Id, string Title, Asset Asset, string Author, bool Finished, int EpsCount);

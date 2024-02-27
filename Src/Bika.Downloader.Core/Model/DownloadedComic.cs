@@ -1,6 +1,6 @@
 namespace Bika.Downloader.Core.Model;
 
-public record DownloadedComic
+public record struct DownloadedComic
 {
     public string Id { get; init; }
     public string Title { get; init; }
@@ -17,3 +17,4 @@ public record DownloadedComic
         EpisodesId = [];
     }
 }
+
