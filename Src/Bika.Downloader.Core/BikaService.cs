@@ -187,7 +187,7 @@ public class BikaService(IConfiguration config)
         if (totalPage > 1)
         {
             // 异步但不阻塞
-            for (var i = 2; i < totalPage; i++) GetPageData(i);
+            for (var i = 2; i <= totalPage; i++) GetPageData(i);
         }
 
         var pageIndex = 0;
@@ -195,6 +195,7 @@ public class BikaService(IConfiguration config)
         // 自旋读取result
         while (true)
         {
+            // Console.WriteLine($"{pageIndex} {totalPage}");
             // 索引相比页数本就要+1，索引>=总页数 等于当前页已经比总页数大了
             if (pageIndex >= totalPage) break;
             IEnumerable<T>? pageData = result[pageIndex];
@@ -229,6 +230,16 @@ public class BikaService(IConfiguration config)
 
     }
 
+    public async Task<IEnumerable<DownloadedComic>> GetDownloadedComics()
+    {
+        await using FileStream stream = File.Open("downloaded.json", FileMode.OpenOrCreate);
+        if (stream.Length != 0) return JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
+        byte[] content = "[]"u8.ToArray();
+        await stream.WriteAsync(content);
+        stream.Position = 0;
+        return [];
+    }
+
     /**
      * 下载参数提供的本子
      */
@@ -240,26 +251,16 @@ public class BikaService(IConfiguration config)
         }
     }
 
-    // Todo: 加入IProgress进度
     public async Task Download(Comic comic, IProgress<DownloadProgress>? progress = null)
     {
         // 并发下载图片数量
-        SemaphoreSlim semaphore = new(10);
+        SemaphoreSlim semaphore = new(5);
 
-        // 读取downloaded.json文件反序列化
-        await using FileStream stream = File.Open("downloaded.json", FileMode.OpenOrCreate);
-        if (stream.Length == 0)
-        {
-            byte[] content = "[]"u8.ToArray();
-            await stream.WriteAsync(content);
-            stream.Position = 0;
-        }
-
-        List<DownloadedComic> downloadedComics = JsonSerializer.Deserialize<List<DownloadedComic>>(stream) ?? [];
+        List<DownloadedComic> downloadedComics = (await GetDownloadedComics()).ToList();
         DownloadedComic downloadedComic = downloadedComics.Where(c => c.Id == comic.Id)
                                                           .FirstOrDefault(new DownloadedComic(comic));
 
-        // 下载过了并且已经全部下载没有新更新
+        // 全部章节已经下载并且没有新更新
         if (comic.EpsCount <= downloadedComic.EpisodesId.Count) return;
 
         const string rootPath = "comics";
@@ -267,8 +268,9 @@ public class BikaService(IConfiguration config)
         comicPath = ReplaceInvalidChar(comicPath);
         Directory.CreateDirectory(comicPath);
 
-
-        // 下载一个章节
+        List<(string episodeId, List<Func<Task>> picDownloadTasks)> episodeDownloadTasks = [];
+        float downloadedPicCount = 0;
+        // 汇总章节的图片下载任务
         await foreach ((_, Episode episode) in GetEpisodesAsync(comic.Id))
         {
             bool isDownloaded = downloadedComic.EpisodesId.Contains(episode.Id);
@@ -279,8 +281,9 @@ public class BikaService(IConfiguration config)
             episodePath = ReplaceInvalidChar(episodePath);
             Directory.CreateDirectory(episodePath);
 
-            List<Task> allDownloadPicTask = [];
-            float downloadedPicCount = 0;
+            (string Id, List<Func<Task>> picDownloadTasks) episodeDownloadTask = (episode.Id, []);
+            episodeDownloadTasks.Add(episodeDownloadTask);
+
             // 下载该章节的所有图片
             await foreach ((int picIndex, Asset picture) in GetEpisodePicturesAsync(comic.Id, episode.Order))
             {
@@ -288,37 +291,55 @@ public class BikaService(IConfiguration config)
                 string filePath = Path.Join(episodePath, filename);
                 var url = $"{picture.FileServer}/static/{picture.Path}";
 
-                allDownloadPicTask.Add(DownloadPic(filePath, url));
+                episodeDownloadTask.picDownloadTasks.Add(DownloadPic(filePath, url));
                 continue;
 
-                async Task DownloadPic(string filePath, string url)
+                Func<Task> DownloadPic(string filePath, string url)
                 {
-                    await semaphore.WaitAsync();
-                    var temp = $"{filePath}.tmp";
-                    await using FileStream fileStream = File.Create(temp);
-                    Stream picStream = await _assetHttpClient.GetStreamAsync(url);
-                    // 将该图片的二进制流写入文件流
-                    await picStream.CopyToAsync(fileStream);
-                    File.Move(temp, filePath, true);
-                    semaphore.Release();
-                    downloadedPicCount++;
-                    DownloadProgress downloadProgress = new(comic.Title, episode.Title, downloadedPicCount / allDownloadPicTask.Count);
-                    progress?.Report(downloadProgress);
+                    // 返回一个函数，避免调用这个方法就启动该任务导致变量获取出错
+                    return async () => {
+                        await semaphore.WaitAsync();
+                        var temp = $"{filePath}.tmp";
+                        await using FileStream fileStream = File.Create(temp);
+                        Stream picStream = await _assetHttpClient.GetStreamAsync(url);
+                        // 将该图片的二进制流写入文件流
+                        await picStream.CopyToAsync(fileStream);
+                        File.Move(temp, filePath, true);
+                        downloadedPicCount++;
+                        // 这个代码放上面就会执行出错
+                        int allEpisodePicTotal = episodeDownloadTasks.Select(d => d.picDownloadTasks.Count)
+                                                                     .Aggregate((all, cur) => all + cur);
+                        DownloadProgress downloadProgress =
+                            new(comic.Title, episode.Title, downloadedPicCount / allEpisodePicTotal, comic.Id);
+                        progress?.Report(downloadProgress);
+                        semaphore.Release();
+                    };
                 }
             }
 
-            // 并发下载所有图片(方法内部控制了并发数量)
-            await Task.WhenAll(allDownloadPicTask);
-
-            downloadedComic.EpisodesId.Add(episode.Id);
-            stream.SetLength(0);
+            // episodeChunkTasks.Add(allDownloadPicTask);
         }
 
-        // 写入downloaded.json文件
-        if (!downloadedComics.Exists(c => c.Id == comic.Id)) downloadedComics.Add(downloadedComic);
-        await JsonSerializer.SerializeAsync(stream, downloadedComics, _normalSerializeOption);
+        // 迭代所有待下载的章节任务
+        foreach ((string episodeId, List<Func<Task>> picDownloadTasks) in episodeDownloadTasks)
+        {
+            // 启动内部的函数，开始执行下载图片任务
+            await Task.WhenAll(picDownloadTasks.Select(fn => fn()));
+            downloadedComic.EpisodesId.Add(episodeId);
+            await WriteIntoJsonFile();
+        }
+
 
         return;
+
+        // 写入downloaded.json文件
+        async Task WriteIntoJsonFile()
+        {
+            // 该漫画没有被下载过
+            if (!downloadedComics.Exists(c => c.Id == comic.Id)) downloadedComics.Add(downloadedComic);
+            await using FileStream stream = File.Open("downloaded.json", FileMode.OpenOrCreate);
+            await JsonSerializer.SerializeAsync(stream, downloadedComics, _normalSerializeOption);
+        }
 
         string ReplaceInvalidChar(string str)
         {
