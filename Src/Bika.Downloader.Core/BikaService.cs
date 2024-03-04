@@ -309,15 +309,13 @@ public class BikaService(IConfiguration config)
                         // 这个代码放上面就会执行出错
                         int allEpisodePicTotal = episodeDownloadTasks.Select(d => d.picDownloadTasks.Count)
                                                                      .Aggregate((all, cur) => all + cur);
-                        DownloadProgress downloadProgress =
-                            new(comic.Title, episode.Title, downloadedPicCount / allEpisodePicTotal, comic.Id);
+                        float percent = downloadedPicCount / allEpisodePicTotal;
+                        DownloadProgress downloadProgress = new(comic.Title, episode.Title, percent, comic.Id);
                         progress?.Report(downloadProgress);
                         semaphore.Release();
                     };
                 }
             }
-
-            // episodeChunkTasks.Add(allDownloadPicTask);
         }
 
         // 迭代所有待下载的章节任务

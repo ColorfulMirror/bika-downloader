@@ -43,7 +43,8 @@ public class App(IHostApplicationLifetime host, BikaService bikaService, IConfig
                                     ).ToList();
 
         AnsiConsole.MarkupLine(
-            $"[red]新下载[/]漫画[green]{unDownloadedComics.Count}[/]本, [red]更新的[/]漫画[green]{updatedComics.Count}[/]本");
+            $"[red]新下载[/]漫画[green]{unDownloadedComics.Count}[/]本, [red]更新的[/]漫画[green]{updatedComics.Count}[/]本"
+        );
 
 
         // await bikaService.Download(comic);
