@@ -27,6 +27,8 @@ public class BikaService(IConfiguration config)
     public async Task LoginAsync()
     {
         var data = new { email = config["username"], password = config["password"] };
+        if (data.email == null) throw new Exception("登录失败，未提供username，请检查bika-downloader.config.json文件");
+        if (data.password == null) throw new Exception("登录失败，未提供password，请检查bika-downloader.config.json文件");
         using HttpResponseMessage response = await _httpClient.PostAsJsonAsync("auth/sign-in", data);
         response.EnsureSuccessStatusCode();
 
@@ -264,9 +266,9 @@ public class BikaService(IConfiguration config)
         if (comic.EpsCount <= downloadedComic.EpisodesId.Count) return;
 
         const string rootPath = "comics";
-        string comicPath = Path.Join(rootPath, $"[{comic.Author}]{comic.Title}");
-        comicPath = ReplaceInvalidChar(comicPath);
-        Directory.CreateDirectory(comicPath);
+        // string comicPath = Path.Join(rootPath, $"[{comic.Author}]{comic.Title}");
+        // comicPath = ReplaceInvalidChar(comicPath);
+        // Directory.CreateDirectory(comicPath);
 
         List<(string episodeId, List<Func<Task>> picDownloadTasks)> episodeDownloadTasks = [];
         float downloadedPicCount = 0;
@@ -277,7 +279,7 @@ public class BikaService(IConfiguration config)
             // 该章节下载过了就跳过
             if (isDownloaded) continue;
 
-            string episodePath = Path.Join(comicPath, $"[{comic.Author}]{comic.Title}.{episode.Title}");
+            string episodePath = Path.Join(rootPath, $"[{comic.Author}]{comic.Title}.{episode.Title}");
             episodePath = ReplaceInvalidChar(episodePath);
             Directory.CreateDirectory(episodePath);
 

@@ -4,7 +4,10 @@
         <TargetFramework>net8.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <PublishSingleFile>true</PublishSingleFile>
+        <DebugType>embedded</DebugType>
         <Nullable>enable</Nullable>
+        <!-- .NET8开启剪裁未使用代码(PublishTrimmed)会禁用反射序列化，需要提供下面声明来启动 -->
+        <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
     </PropertyGroup>
 
     <ItemGroup>
@@ -19,9 +22,7 @@
 
 
     <ItemGroup>
-        <None Remove="appsettings.Production.json"/>
-        <Content Include="appsettings.Production.json">
-            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-        </Content>
+        <!-- 最终输出在项目文件中排除appsettings.json -->
+        <None Remove="appsettings.json"/>
     </ItemGroup>
 </Project>
