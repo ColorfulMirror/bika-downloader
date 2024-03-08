@@ -13,7 +13,7 @@ namespace Bika.Downloader.Terminal;
  * Episodes: 588d62e73f65ce7fcdd60a27 贈品本 ; 5884941e3f65ce7fcdd5be88 第1集
  *
  * おさえきれないこの情欲 58777ebd6eb21f2a740fa6db
- * 单行本 58777ebd6eb21f2a740fa6dc,
+ * 单行本 58777ebd6eb21f2a740fa6dc
  */
 public partial class App(IHostApplicationLifetime host, BikaService bikaService, IConfiguration config) : BackgroundService
 {
