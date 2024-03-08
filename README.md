@@ -6,7 +6,7 @@
 
 1. 创建一个工作区文件夹(建议创建，因为程序会在当前所在目录下载输出文件)
 2. 打开命令行，进入该文件夹
-3. [下载程序文件]()到该文件夹
+3. [下载程序文件](./releases)到该文件夹
 4. 在User目录下创建bika-downloader.config.json，写明账户名和密码
     ```json
     {
@@ -14,10 +14,9 @@
       "password": "xxxxx"
     }
     ```
-User目录windows下就在"C/Users/[你自己的用户名]"，MacOS在"/Macintosh HD/用户/[你自己的用户名]"，linux在"/home/[你自己的用户名]"
-
-通常在命令行内使用`cd ~`就可以进入User目录
-5. 在命令行内运行该程序
+    User目录windows下就在"C/Users/[你自己的用户名]"，MacOS在"/Macintosh HD/用户/[你自己的用户名]"，linux在"/home/[你自己的用户名]"
+    通常在命令行内使用`cd ~`就可以进入User目录
+5. 在命令行内运行该程序 
     ```bash
       # 尾缀根据目标系统不同而不同这里不赘述
       ./Bika.Downloader-windows-x86 
